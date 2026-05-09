@@ -50,6 +50,44 @@ def get_artifact():
 
 
 @st.cache_data
+def get_global_shap(_artifact, top_n: int = 15):
+    """
+    Compute mean |SHAP| across the full test set for global feature importance.
+    _artifact uses leading underscore so Streamlit does not try to hash it.
+    """
+    X_test, _ = get_test_data()
+
+    pipeline = _artifact["pipeline"]
+    from sklearn.pipeline import Pipeline as SkPipeline
+    steps_without_clf = [
+        (name, step) for name, step in pipeline.steps
+        if name not in ("smote", "classifier")
+    ]
+    transform_pipe = SkPipeline(steps_without_clf)
+    X_transformed = transform_pipe.transform(X_test)
+
+    classifier = pipeline.named_steps["classifier"]
+    explainer = shap.TreeExplainer(classifier)
+    shap_matrix = explainer.shap_values(X_transformed)
+
+    try:
+        preprocessor = pipeline.named_steps["preprocessor"]
+        feat_names = list(preprocessor.get_feature_names_out())
+    except Exception:
+        feat_names = [f"f{i}" for i in range(X_transformed.shape[1])]
+
+    mean_abs = np.abs(shap_matrix).mean(axis=0)
+    idx = np.argsort(mean_abs)[::-1][:top_n]
+
+    return {
+        "feature_names": [feat_names[i] for i in idx],
+        "mean_abs_shap": mean_abs[idx].tolist(),
+        "all_mean_abs": mean_abs.tolist(),
+        "all_feature_names": feat_names,
+    }
+
+
+@st.cache_data
 def get_test_data():
     df = load_raw(DATA_PATH)
     df = basic_cleaning(df)
@@ -66,7 +104,7 @@ st.sidebar.markdown("**End-to-end ML system** for retail banking customer churn.
 
 section = st.sidebar.radio(
     "Navigate",
-    ["📊 Model Overview", "🔍 Individual Prediction", "💼 Business Impact"],
+    ["📊 Model Overview", "🔍 Individual Prediction", "💼 Business Impact", "📈 Model Insights"],
     index=0,
 )
 
@@ -353,3 +391,277 @@ elif section == "💼 Business Impact":
         f"{threshold}. Revenue figures assume CLV is fully realized for retained customers. "
         "Results scale linearly from the 2,000-customer hold-out test set."
     )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SECTION 4 — Model Insights & Analysis
+# ═══════════════════════════════════════════════════════════════════════════════
+elif section == "📈 Model Insights":
+    st.title("📈 Model Insights & Analysis")
+    st.markdown(
+        "Deep-dive into what the model has learned — global feature drivers, "
+        "segment-level churn patterns, and actionable retention priorities."
+    )
+
+    X_test, y_test = get_test_data()
+
+    # Build segment DataFrame once (reused across tabs)
+    df_seg = X_test.copy()
+    df_seg["Actual_Churn"] = y_test.values
+    df_seg["Churn_Prob"] = predict_proba(artifact, X_test)
+    df_seg["Predicted_Churn"] = (df_seg["Churn_Prob"] >= threshold).astype(int)
+    df_seg["Age_Group"] = pd.cut(
+        df_seg["Age"],
+        bins=[0, 35, 50, 60, 100],
+        labels=["Young (≤35)", "Mid (36–50)", "Senior (51–60)", "Elder (61+)"],
+    ).astype(str)
+
+    overall_churn_rate = df_seg["Actual_Churn"].mean() * 100
+
+    tab1, tab2, tab3 = st.tabs(
+        ["🎯 Feature Importance", "👥 Segment Analysis", "💡 Key Findings"]
+    )
+
+    # ── Tab 1: Global SHAP Feature Importance ─────────────────────────────────
+    with tab1:
+        st.subheader("Global Feature Importance")
+        st.markdown(
+            "**Mean |SHAP value|** across all 2,000 test customers — measures how much each "
+            "feature shifts the model's prediction on average. Higher = more influential."
+        )
+
+        with st.spinner("Computing global SHAP values…"):
+            shap_data = get_global_shap(artifact)
+
+        top_names = shap_data["feature_names"]
+        top_vals = np.array(shap_data["mean_abs_shap"])
+
+        fig, ax = plt.subplots(figsize=(9, 5.5))
+        palette = plt.cm.YlOrRd(np.linspace(0.25, 0.9, len(top_vals)))
+        ax.barh(
+            list(range(len(top_vals))),
+            top_vals[::-1],
+            color=palette,
+            edgecolor="white",
+            linewidth=0.8,
+        )
+        ax.set_yticks(list(range(len(top_vals))))
+        ax.set_yticklabels(top_names[::-1], fontsize=9)
+        ax.set_xlabel("Mean |SHAP Value| (impact on churn log-odds)", fontsize=9)
+        ax.set_title(f"Top {len(top_vals)} Most Important Features — Global View", fontweight="bold")
+        ax.axvline(0, color="gray", linewidth=0.5)
+        st.pyplot(fig)
+        plt.close()
+
+        importance_df = pd.DataFrame(
+            {"Feature": top_names, "Mean |SHAP|": [round(v, 4) for v in top_vals]},
+            index=range(1, len(top_names) + 1),
+        )
+        importance_df.index.name = "Rank"
+        st.dataframe(importance_df, use_container_width=True)
+        st.caption(
+            "Feature names reflect the pipeline's internal encoding. "
+            "OHE = One-Hot Encoded · num_ = scaled numeric · ord_ = ordinal."
+        )
+
+    # ── Tab 2: Segment Analysis ────────────────────────────────────────────────
+    with tab2:
+        st.subheader("Churn Rate by Customer Segment")
+        st.markdown(
+            f"Actual churn rate on the hold-out test set. "
+            f"Red dashed line = overall average ({overall_churn_rate:.1f}%). "
+            f"Orange bars exceed the average."
+        )
+
+        def _bar_chart(ax, labels, values, avg, ylabel, title, rotation=0):
+            colors = ["#DD8452" if v > avg else "#4C72B0" for v in values]
+            bars = ax.bar(labels, values, color=colors, edgecolor="white", linewidth=0.8)
+            ax.axhline(avg, color="red", linestyle="--", lw=1.5, label=f"Avg ({avg:.1f}%)")
+            for bar, val in zip(bars, values):
+                ax.text(
+                    bar.get_x() + bar.get_width() / 2,
+                    bar.get_height() + max(values) * 0.03,
+                    f"{val:.1f}%",
+                    ha="center", fontweight="bold", fontsize=8,
+                )
+            ax.set_ylabel(ylabel)
+            ax.set_title(title, fontweight="bold")
+            ax.set_ylim(0, max(values) * 1.3)
+            if rotation:
+                ax.set_xticklabels(labels, rotation=rotation, ha="right")
+            ax.legend(fontsize=8)
+
+        col_a, col_b = st.columns(2)
+
+        with col_a:
+            geo = df_seg.groupby("Geography")["Actual_Churn"].mean() * 100
+            fig, ax = plt.subplots(figsize=(5, 3.8))
+            _bar_chart(ax, geo.index.tolist(), geo.values.tolist(),
+                       overall_churn_rate, "Churn Rate (%)", "By Geography")
+            st.pyplot(fig); plt.close()
+
+        with col_b:
+            gen = df_seg.groupby("Gender")["Actual_Churn"].mean() * 100
+            fig, ax = plt.subplots(figsize=(5, 3.8))
+            _bar_chart(ax, gen.index.tolist(), gen.values.tolist(),
+                       overall_churn_rate, "Churn Rate (%)", "By Gender")
+            st.pyplot(fig); plt.close()
+
+        col_c, col_d = st.columns(2)
+
+        with col_c:
+            age_order = ["Young (≤35)", "Mid (36–50)", "Senior (51–60)", "Elder (61+)"]
+            age_vals = [
+                df_seg[df_seg["Age_Group"] == g]["Actual_Churn"].mean() * 100
+                for g in age_order
+            ]
+            fig, ax = plt.subplots(figsize=(5, 3.8))
+            _bar_chart(ax, age_order, age_vals,
+                       overall_churn_rate, "Churn Rate (%)", "By Age Group", rotation=15)
+            st.pyplot(fig); plt.close()
+
+        with col_d:
+            prod = df_seg.groupby("NumOfProducts")["Actual_Churn"].mean() * 100
+            fig, ax = plt.subplots(figsize=(5, 3.8))
+            _bar_chart(ax, [f"{p} Product{'s' if p > 1 else ''}" for p in prod.index],
+                       prod.values.tolist(),
+                       overall_churn_rate, "Churn Rate (%)", "By # Products")
+            st.pyplot(fig); plt.close()
+
+        st.divider()
+
+        col_e, col_f = st.columns(2)
+
+        with col_e:
+            st.markdown("**Active vs Inactive Members**")
+            act = df_seg.groupby("IsActiveMember")["Actual_Churn"].mean() * 100
+            labels = ["Inactive", "Active"]
+            vals = [act.get(0, 0), act.get(1, 0)]
+            fig, ax = plt.subplots(figsize=(5, 3.5))
+            _bar_chart(ax, labels, vals,
+                       overall_churn_rate, "Churn Rate (%)", "By Member Activity Status")
+            st.pyplot(fig); plt.close()
+
+        with col_f:
+            st.markdown("**Mean Predicted Risk by Satisfaction Score**")
+            sat = df_seg.groupby("Satisfaction Score")["Churn_Prob"].mean() * 100
+            fig, ax = plt.subplots(figsize=(5, 3.5))
+            bars = ax.bar(
+                sat.index.astype(str), sat.values,
+                color="#9B59B6", edgecolor="white", linewidth=0.8,
+            )
+            for bar, val in zip(bars, sat.values):
+                ax.text(bar.get_x() + bar.get_width() / 2,
+                        bar.get_height() + 0.3,
+                        f"{val:.1f}%", ha="center", fontweight="bold", fontsize=8)
+            ax.set_xlabel("Satisfaction Score")
+            ax.set_ylabel("Mean Predicted Churn Prob (%)")
+            ax.set_title("Predicted Risk by Satisfaction Score", fontweight="bold")
+            ax.set_ylim(0, sat.max() * 1.3)
+            st.pyplot(fig); plt.close()
+
+        # Geography × Active Member heatmap
+        st.divider()
+        st.subheader("Churn Rate Heatmap — Geography × Activity")
+        heat = (
+            df_seg.groupby(["Geography", "IsActiveMember"])["Actual_Churn"]
+            .mean()
+            .unstack()
+            .rename(columns={0: "Inactive", 1: "Active"})
+            * 100
+        )
+        fig, ax = plt.subplots(figsize=(6, 3))
+        sns.heatmap(
+            heat, annot=True, fmt=".1f", cmap="YlOrRd", ax=ax,
+            linewidths=0.5, cbar_kws={"label": "Churn Rate (%)"},
+        )
+        ax.set_title("Churn Rate (%) by Geography & Member Activity", fontweight="bold")
+        ax.set_ylabel("")
+        col_heat, _ = st.columns([1, 1])
+        with col_heat:
+            st.pyplot(fig)
+        plt.close()
+
+    # ── Tab 3: Key Findings ────────────────────────────────────────────────────
+    with tab3:
+        st.subheader("💡 Key Findings from Model Analysis")
+
+        # Recompute stats for narrative
+        geo_churn = df_seg.groupby("Geography")["Actual_Churn"].mean() * 100
+        top_geo = geo_churn.idxmax()
+        low_geo = geo_churn.idxmin()
+
+        gen_churn = df_seg.groupby("Gender")["Actual_Churn"].mean() * 100
+        top_gen = gen_churn.idxmax()
+
+        prod_churn = df_seg.groupby("NumOfProducts")["Actual_Churn"].mean() * 100
+
+        age_order = ["Young (≤35)", "Mid (36–50)", "Senior (51–60)", "Elder (61+)"]
+        age_churn = {
+            g: df_seg[df_seg["Age_Group"] == g]["Actual_Churn"].mean() * 100
+            for g in age_order
+        }
+        top_age = max(age_churn, key=age_churn.get)
+
+        act_churn = df_seg.groupby("IsActiveMember")["Actual_Churn"].mean() * 100
+        inactive_rate = act_churn.get(0, 0)
+        active_rate = act_churn.get(1, 0)
+
+        zero_bal = df_seg[df_seg["Balance"] == 0]["Actual_Churn"].mean() * 100
+        nonzero_bal = df_seg[df_seg["Balance"] > 0]["Actual_Churn"].mean() * 100
+
+        top_feature = shap_data["feature_names"][0] if shap_data else "N/A"
+
+        st.markdown(f"""
+#### 🌍 Geography
+- **{top_geo}** has the highest churn rate at **{geo_churn[top_geo]:.1f}%** —
+  **{geo_churn[top_geo] / overall_churn_rate:.1f}×** the overall average of {overall_churn_rate:.1f}%.
+- **{low_geo}** is the lowest-risk market at **{geo_churn[low_geo]:.1f}%**.
+- Geography-specific retention campaigns should prioritize {top_geo}.
+
+#### 👤 Gender
+- **{top_gen}** customers churn at **{gen_churn[top_gen]:.1f}%**,
+  vs {gen_churn[gen_churn.index != top_gen].values[0]:.1f}% for the other gender.
+- Gender-targeted product offers or communication styles may reduce this gap.
+
+#### 📦 Number of Products
+- **2-product customers** are the most loyal at **{prod_churn.get(2, 0):.1f}%** churn.
+- **1-product customers** churn at **{prod_churn.get(1, 0):.1f}%** — cross-selling a second product
+  is the single highest-impact retention lever.
+- **3+ product customers** churn at extreme rates
+  ({prod_churn.get(3, 0):.1f}%–{prod_churn.get(4, 0) if 4 in prod_churn else prod_churn.get(3, 0):.1f}%),
+  suggesting product overload or poor fit.
+
+#### 🎂 Age
+- Churn risk peaks in the **{top_age}** cohort at **{age_churn[top_age]:.1f}%**.
+- Younger customers (≤35) have the lowest risk at {age_churn.get('Young (≤35)', 0):.1f}% —
+  focus senior-specific value propositions on wealth management and advisory services.
+
+#### ⚡ Member Activity
+- **Inactive members** churn at **{inactive_rate:.1f}%** vs **{active_rate:.1f}%** for active members
+  — a **{inactive_rate / max(active_rate, 0.01):.1f}× gap**.
+- Re-engagement campaigns (app logins, product usage nudges) are among the most cost-effective
+  retention moves.
+
+#### 💰 Balance
+- Customers with a **zero balance** churn at **{zero_bal:.1f}%**, while those with a positive
+  balance churn at **{nonzero_bal:.1f}%**.
+- Zero-balance accounts are "sleeping" accounts — targeted activation offers can reduce attrition.
+        """)
+
+        st.divider()
+        st.subheader("🎯 Recommended Retention Priority Segments")
+        st.markdown(f"""
+| Priority | Segment | Est. Churn Rate | Recommended Action |
+|---|---|---|---|
+| 🔴 Critical | {top_geo} + Inactive | ~{df_seg[(df_seg['Geography']==top_geo)&(df_seg['IsActiveMember']==0)]['Actual_Churn'].mean()*100:.0f}% | Immediate outreach + product review |
+| 🟠 High | {top_gen} customers, 1 product | ~{df_seg[(df_seg['Gender']==top_gen)&(df_seg['NumOfProducts']==1)]['Actual_Churn'].mean()*100:.0f}% | Cross-sell second product |
+| 🟡 Medium | {top_age} group, inactive | ~{df_seg[(df_seg['Age_Group']==top_age)&(df_seg['IsActiveMember']==0)]['Actual_Churn'].mean()*100:.0f}% | Advisory service upsell |
+| 🟢 Watch | 3+ product customers | ~{prod_churn.get(3, 0):.0f}% | Review product mix, reduce friction |
+        """)
+
+        st.info(
+            f"**Top model driver:** `{top_feature}` has the highest global SHAP value "
+            f"({shap_data['mean_abs_shap'][0]:.4f}), making it the single strongest predictor "
+            "of churn in this model. Focus operational metrics around this feature."
+        )
