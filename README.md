@@ -4,14 +4,14 @@
 
 ![Python](https://img.shields.io/badge/Python-3.11-3776AB?style=flat&logo=python&logoColor=white)
 ![XGBoost](https://img.shields.io/badge/XGBoost-Latest-FF6600?style=flat)
-![Streamlit](https://img.shields.io/badge/Demo-Live-FF4B4B?style=flat&logo=streamlit&logoColor=white)
+[![Streamlit](https://img.shields.io/badge/Demo-Live-FF4B4B?style=flat&logo=streamlit&logoColor=white)](https://nicolaszuleta95-banking-churn-prediction.streamlit.app)
 ![SHAP](https://img.shields.io/badge/Explainability-SHAP-blueviolet?style=flat)
 ![License](https://img.shields.io/badge/License-MIT-22c55e?style=flat)
 
 **End-to-end machine learning system to predict customer churn in retail banking —
 with business impact analysis, model interpretability, and an interactive demo.**
 
-[🚀 Live Demo](https://banking-churn-nz.streamlit.app) · [📓 EDA Notebook](notebooks/01_eda.ipynb) · [📊 Model Card](reports/model_card.md)
+[🚀 Live Demo](https://nicolaszuleta95-banking-churn-prediction.streamlit.app) · [📓 EDA Notebook](notebooks/01_eda.ipynb) · [📊 Model Card](reports/model_card.md)
 
 </div>
 
@@ -60,7 +60,7 @@ The interactive Streamlit app has three sections:
 - **Individual Prediction** — Input a customer profile and get a churn probability + SHAP explanation of *why*
 - **Business Impact Dashboard** — Revenue at risk, customers flagged, and ROI of retention intervention
 
-👉 [**Try the live demo →**](https://banking-churn-nz.streamlit.app)
+👉 [**Try the live demo →**](https://nicolaszuleta95-banking-churn-prediction.streamlit.app)
 
 > ![App Screenshot](reports/app_screenshot.png)
 
